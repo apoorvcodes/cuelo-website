@@ -1,0 +1,969 @@
+---
+import Layout from '../layouts/Layout.astro';
+import Garden from '../components/Garden.astro';
+
+const GITHUB = 'https://github.com/apoorvcodes/cuelo';
+const LINKS = {
+	docs: `${GITHUB}#readme`, // the README until a docs site exists
+	github: GITHUB,
+};
+
+const STAR_PATH = 'M0-10Q.9-.9 10 0Q.9.9 0 10Q-.9.9-10 0Q-.9-.9 0-10Z';
+
+// ---- 01 providers: plain names, grouped by job (no logos, on purpose) ----
+const chain = [
+	{ id: 'in', role: 'Speech in', names: ['Smallest.ai', 'Deepgram', 'AssemblyAI', 'Whisper'] },
+	{ id: 'llm', role: 'Reasoning', names: ['Anthropic', 'OpenAI', 'Gemini', 'Groq'] },
+	{ id: 'out', role: 'Speech out', names: ['ElevenLabs', 'Smallest.ai', 'Cartesia', 'Rime'] },
+];
+const s2s = ['OpenAI Realtime', 'Gemini Live', 'Moshi'];
+
+// ---- tiny highlighters for the code samples ----
+const esc = (s: string) => s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+
+const hlValue = (v: string) => {
+	const c = v.indexOf(' #');
+	const [val, com] = c >= 0 ? [v.slice(0, c), v.slice(c)] : [v, ''];
+	const body = /^\s*"/.test(val) ? `<span class="t-s">${esc(val)}</span>` : /^\s*(true|false|\d[\w.]*)\s*$/.test(val) ? `<span class="t-n">${esc(val)}</span>` : `<span class="t-v">${esc(val)}</span>`;
+	return body + (com ? `<span class="t-c">${esc(com)}</span>` : '');
+};
+// config.cuelo: one span per line (so a line can light up), keys, values, comments
+const hlCuelo = (src: string) =>
+	src
+		.split('\n')
+		.map((line) => {
+			let html: string;
+			const m = line.match(/^(\s*)(#.*)$/);
+			const kv = line.match(/^(\s*)(- )?([\w.]+)(:)(.*)$/);
+			const item = line.match(/^(\s*)- (.*)$/);
+			if (m) html = `${m[1]}<span class="t-c">${esc(m[2])}</span>`;
+			else if (kv) {
+				const [, ind, dash = '', key, colon, rest] = kv;
+				html = `${ind}${dash ? '<span class="t-p">- </span>' : ''}<span class="t-k">${key}</span><span class="t-p">${colon}</span>${hlValue(rest)}`;
+			} else if (item) html = `${item[1]}<span class="t-p">- </span>${hlValue(' ' + item[2]).replace('> ', '>')}`;
+			else html = esc(line);
+			return `<span class="ln">${html || ' '}</span>`;
+		})
+		.join('');
+
+// TS / Python / Go / shell: comments, strings, keywords
+const hlCode = (src: string) =>
+	esc(src).replace(/(\/\/.*|#.*)|("[^"]*"|'[^']*'|`[^`]*`)|\b(import|from|const|await|async|func|package|def|return|new|for|in|with|as|defer|if|nil)\b/g, (m, com, str, kw) =>
+		com ? `<span class="t-c">${com}</span>` : str ? `<span class="t-s">${str}</span>` : kw ? `<span class="t-kw">${kw}</span>` : m,
+	);
+
+// ---- 02 config ----
+const CONFIG = `# config.cuelo
+name: support-line
+
+talker:
+  asr: smallest
+  tts: elevenlabs
+  voice: "aria"
+
+llm:
+  model: anthropic
+  prompt: ./prompts/support.md
+
+actions:
+  - tools/lookup_order
+  - tools/update_address
+
+turns:
+  endpointing: semantic
+  barge_in: true
+
+memory:
+  shared: redis
+
+serve:
+  api: openai-realtime`;
+
+const configHtml = hlCuelo(CONFIG)
+	.replace('<span class="t-v"> smallest</span>', '<span class="t-v"> <span class="swap" data-swap="asr">smallest</span></span>')
+	.replace('<span class="t-v"> elevenlabs</span>', '<span class="t-v"> <span class="swap" data-swap="tts">elevenlabs</span></span>')
+	.replace('<span class="t-v"> anthropic</span>', '<span class="t-v"> <span class="swap" data-swap="model">anthropic</span></span>')
+	.replace('<span class="t-v"> semantic</span>', '<span class="t-v"> <span class="swap" data-swap="turns">semantic</span></span>');
+
+// the live pipeline beside the file: one row per stage
+const stages = [
+	{ id: 'asr', stage: 'speech in', value: 'smallest', key: 'talker.asr' },
+	{ id: 'turns', stage: 'turn-taking', value: 'semantic', key: 'turns' },
+	{ id: 'model', stage: 'reasoning', value: 'anthropic', key: 'llm.model' },
+	{ id: 'actions', stage: 'actions', value: '2 tools', key: 'actions' },
+	{ id: 'tts', stage: 'speech out', value: 'elevenlabs', key: 'talker.tts' },
+	{ id: 'memory', stage: 'memory', value: 'redis', key: 'memory' },
+];
+
+// ---- 03 serve: what `cuelo serve` prints, per API shape ----
+type TLine = [kind: 'cmd' | 'ok' | 'dim' | 'route' | 'gap' | 'ready', ...cells: string[]];
+const boot: TLine[] = [
+	['cmd', 'cuelo serve config.cuelo'],
+	['gap'],
+	['ok', 'talker', 'smallest → elevenlabs'],
+	['ok', 'llm', 'anthropic · 2 tools'],
+	['ok', 'turns', 'semantic endpointing'],
+	['ok', 'memory', 'redis'],
+	['ok', 'store', 'sqlite://cuelo.db'],
+	['gap'],
+];
+const terminals: Record<string, { label: string; lines: TLine[] }> = {
+	realtime: {
+		label: 'openai-realtime',
+		lines: [
+			...boot,
+			['dim', 'support-line · openai-realtime'],
+			['route', 'WS', 'ws://localhost:4141/v1/realtime'],
+			['route', 'POST', 'http://localhost:4141/v1/realtime/sessions'],
+			['route', 'GET', 'http://localhost:4141/v1/models'],
+			['gap'],
+			['ready', 'ready in 412ms · watching config.cuelo'],
+		],
+	},
+	custom: {
+		label: 'custom',
+		lines: [
+			...boot,
+			['dim', 'support-line · custom routes'],
+			['route', 'POST', 'http://localhost:4141/calls'],
+			['route', 'WS', 'ws://localhost:4141/calls/:id'],
+			['route', 'POST', 'http://localhost:4141/calls/:id/transfer'],
+			['gap'],
+			['ready', 'ready in 398ms · watching config.cuelo'],
+		],
+	},
+};
+
+// kept to ~34 columns so each card fits without wrapping or scrolling
+const clients = [
+	{
+		label: 'Python',
+		note: 'stock OpenAI SDK',
+		code: `CUELO = "http://localhost:4141"
+client = AsyncOpenAI(
+  base_url=f"{CUELO}/v1")
+
+rt = client.beta.realtime
+async with rt.connect(
+  model="support-line") as call:
+  ...`,
+	},
+	{
+		label: 'TypeScript',
+		note: 'browser or Node',
+		code: `const url = "ws://localhost:4141"
+const call = await connect(url)
+
+mic.pipe(call)
+call.on("audio", play)`,
+	},
+	{
+		label: 'Go',
+		note: 'servers and edge',
+		code: `call, err := cuelo.Connect(url)
+if err != nil {
+	return err
+}
+defer call.Close()
+
+call.Stream(mic, speaker)`,
+	},
+];
+
+// ---- 04 trace of one turn (ms from the caller starting to speak) ----
+const SPAN = 4000;
+const pct = (ms: number) => `${((ms / SPAN) * 100).toFixed(2)}%`;
+const wave = (n: number, seed: number) => {
+	let s = seed;
+	const r = () => ((s = (s * 1664525 + 1013904223) >>> 0) / 4294967296);
+	return Array.from({ length: n }, (_, i) => Math.round(18 + Math.sin((Math.PI * (i + 0.5)) / n) ** 0.6 * (28 + r() * 54)));
+};
+type Row = { label: string; from: number; to: number; kind: 'audio-in' | 'audio-out' | 'bar' | 'mark' | 'tick'; note?: string; wave?: number[] };
+const trace: Row[] = [
+	{ label: 'caller', from: 0, to: 1450, kind: 'audio-in', wave: wave(30, 7) },
+	{ label: 'vad', from: 1450, to: 1594, kind: 'bar', note: 'silence 144ms' },
+	{ label: 'asr', from: 80, to: 1530, kind: 'bar', note: 'final +80ms' },
+	{ label: 'turn', from: 1594, to: 1594, kind: 'mark', note: 'end of turn · 0.94' },
+	{ label: 'llm', from: 1594, to: 2300, kind: 'bar', note: 'first token 248ms' },
+	{ label: 'tool', from: 1700, to: 1741, kind: 'tick', note: 'lookup_order 41ms' },
+	{ label: 'tts', from: 1842, to: 1938, kind: 'tick', note: 'first audio 96ms' },
+	{ label: 'talker', from: 1938, to: 3900, kind: 'audio-out', wave: wave(40, 23) },
+];
+const ticks = [0, 1000, 2000, 3000, 4000];
+const kpis = [
+	['ttfb p50', '488', 'ms'],
+	['ttfb p95', '612', 'ms'],
+	['vad tail', '144', 'ms'],
+	['llm ttft', '248', 'ms'],
+	['tts ttfa', '96', 'ms'],
+	['barge-ins', '1', ''],
+];
+// where this call's response time went
+const budget = [
+	{ label: 'vad', ms: 144, tone: 'a' },
+	{ label: 'llm', ms: 248, tone: 'c' },
+	{ label: 'tts', ms: 96, tone: 'd' },
+];
+const suggestions = [
+	{ text: 'Reasoning is half of response time on short replies.', fix: 'llm.fast: groq', why: 'route one-line answers to a faster model' },
+	{ text: 'VAD waits 144ms after the caller stops.', fix: 'turns.min_silence: 400 → 300', why: 'semantic endpointing already covers false stops' },
+	{ text: 'Turn 6: caller barged in 1.2s into a reply.', fix: 'turns.barge_in.min_words: 2', why: 'ignore backchannels like "mm-hm"' },
+];
+
+// ---- 05 data ----
+const stores = ['sqlite://cuelo.db', 'postgres://db.internal/cuelo', 'mysql://db.internal/cuelo'];
+const tables = [
+	['sessions', 'pipeline, caller, started_at, duration, outcome'],
+	['turns', 'session_id, index, ttfb_ms, vad_ms, barge_in'],
+	['events', 'turn_id, stage, name, at_ms, payload'],
+	['transcripts', 'turn_id, speaker, text, confidence'],
+	['audio', 'turn_id, speaker, uri, duration_ms'],
+	['summaries', 'session_id, intent, resolved, text'],
+];
+
+// ---- 06 agents: connect over MCP, then paste a prompt ----
+const installs = [
+	{ id: 'claude', label: 'Claude Code', code: 'claude mcp add cuelo -- npx -y cuelo mcp' },
+	{ id: 'codex', label: 'Codex', code: 'codex mcp add cuelo -- npx -y cuelo mcp' },
+	{ id: 'any', label: 'Hermes · any MCP client', code: '{ "mcpServers": { "cuelo": { "command": "npx", "args": ["-y", "cuelo", "mcp"] } } }' },
+];
+type Step = [kind: 'tool' | 'note' | 'done' | 'warn', name: string, detail?: string];
+const runs: { title: string; prompt: string; steps: Step[] }[] = [
+	{
+		title: 'Build',
+		prompt: 'Build a support line that speaks Hindi and English, uses Smallest.ai for speech, and can look up orders.',
+		steps: [
+			['tool', 'cuelo.init', 'template: support'],
+			['tool', 'cuelo.config.edit', 'talker.asr: smallest · talker.tts: smallest'],
+			['tool', 'cuelo.config.edit', 'languages: [hi, en]'],
+			['tool', 'cuelo.tool.add', 'lookup_order'],
+			['tool', 'cuelo.call', 'test call · 6 turns · no errors'],
+			['done', 'support-line is live on ws://localhost:4141/v1/realtime'],
+		],
+	},
+	{
+		title: 'Speed up',
+		prompt: 'Find the slowest stage in the last 100 calls and fix it in config.cuelo.',
+		steps: [
+			['tool', 'cuelo.trace', 'last: 100'],
+			['tool', 'cuelo.eval', 'metric: ttfb'],
+			['note', 'reasoning is 51% of ttfb on short replies'],
+			['tool', 'cuelo.config.edit', '+ llm.fast: groq'],
+			['tool', 'cuelo.test', 'replay: 100 calls'],
+			['done', 'ttfb p50 488ms → 341ms, task success unchanged'],
+		],
+	},
+	{
+		title: 'Regressions',
+		prompt: "Replay yesterday's calls against this config and tell me what broke.",
+		steps: [
+			['tool', 'cuelo.test', 'replay: calls/2026-11-11 · 214 calls'],
+			['tool', 'cuelo.eval', 'task_success, barge_in, ttfb'],
+			['warn', '3 regressions: transfer not offered on a repeat request'],
+			['tool', 'cuelo.trace', 'sess_91c2, sess_a04e, sess_c7b1'],
+			['done', 'wrote reports/2026-11-12.md with the three traces'],
+		],
+	},
+	{
+		title: 'Add a tool',
+		prompt: 'Add a tool that hands the caller to a person if they ask twice.',
+		steps: [
+			['tool', 'cuelo.tool.add', 'transfer_to_human'],
+			['tool', 'cuelo.config.edit', '+ actions: tools/transfer_to_human'],
+			['tool', 'cuelo.config.edit', '+ turns.escalate_after: 2'],
+			['tool', 'cuelo.test', 'scenario: asks_for_human_twice × 12'],
+			['done', 'transferred on the second ask in 12 of 12 runs'],
+		],
+	},
+	{
+		title: 'Evals in CI',
+		prompt: 'Write evals for interruptions and run them on every change to the config.',
+		steps: [
+			['tool', 'cuelo.eval.add', 'interruptions'],
+			['tool', 'cuelo.eval.add', 'barge_in_recovery'],
+			['tool', 'edit', '.github/workflows/cuelo.yml'],
+			['done', 'evals now run on every change to config.cuelo'],
+		],
+	},
+];
+const mcpTools = ['cuelo.init', 'cuelo.config.edit', 'cuelo.tool.add', 'cuelo.call', 'cuelo.trace', 'cuelo.eval', 'cuelo.test'];
+const commands = ['init', 'dev', 'call', 'test', 'eval', 'trace'];
+---
+
+<Layout>
+	<div class="hero">
+		<Garden />
+
+		<header class="nav">
+			<a href="/" class="logo" aria-label="Cuelo home">cuelo<span class="logo-dot">.</span></a>
+			<nav class="nav-links" aria-label="Main">
+				<a class="nav-link" href={LINKS.docs}>Docs</a>
+				<a class="nav-link" href={LINKS.github}>GitHub <span class="ext" aria-hidden="true">↗</span></a>
+			</nav>
+		</header>
+
+		<div class="copy">
+			<h1 class="headline">The open-source infrastructure to build customisable <em>speech-to-speech systems.</em></h1>
+
+			<p class="sub">
+				A framework for wiring speech, language and action models into one pipeline. Configure it in <code>config.cuelo</code>, run it from the CLI or SDK, and trace audio, transcripts and latency on every turn.
+			</p>
+
+			<div class="actions">
+				<a class="btn btn-primary" href={LINKS.docs}>Get started <span class="arrow" aria-hidden="true">→</span></a>
+				<a class="btn-text" href={LINKS.github}>Star on GitHub <span class="ext" aria-hidden="true">↗</span></a>
+			</div>
+		</div>
+	</div>
+
+	<main class="sections">
+		<!-- 01 providers -->
+		<section class="section" aria-labelledby="s-providers">
+			<Garden variant="side" side="left" seed={0} />
+			<div class="inner">
+				<header class="s-head">
+					<p class="s-label"><svg class="s-star" viewBox="-10 -10 20 20" aria-hidden="true"><path d={STAR_PATH} /></svg><span class="s-n">01</span>Providers</p>
+					<h2 id="s-providers" class="s-title">Bring any model.</h2>
+					<p class="s-lede">Pick a provider for each stage, or one speech-to-speech model end to end. Swapping is a one-line change.</p>
+				</header>
+
+				<div class="chain" data-chain>
+					{
+						chain.map((c, i) => (
+							<>
+								{i > 0 && (
+									<div class="wire" aria-hidden="true">
+										<i style={`animation-delay:${i * 0.4}s`} />
+									</div>
+								)}
+								<div class="slot">
+									<p class="slot-role">{c.role}</p>
+									<p class="slot-window" data-names={JSON.stringify(c.names)} style={`--delay:${i * 280}ms`}>
+										<span class="slot-name">{c.names[0]}</span>
+									</p>
+									<p class="slot-count">{c.names.join(' · ')}</p>
+								</div>
+							</>
+						))
+					}
+				</div>
+
+				<p class="chain-alt">
+					<span class="alt-or">or</span>
+					<span class="slot-window is-inline" data-names={JSON.stringify(s2s)} style="--delay: 900ms"><span class="slot-name">{s2s[0]}</span></span>
+					<span class="alt-note">end to end</span>
+				</p>
+				<p class="s-foot">Anything else with an HTTP or WebSocket API plugs in as a custom provider.</p>
+			</div>
+		</section>
+
+		<!-- 02 config -->
+		<section class="section" aria-labelledby="s-config">
+			<Garden variant="side" side="right" seed={1} />
+			<div class="inner">
+				<header class="s-head">
+					<p class="s-label"><svg class="s-star" viewBox="-10 -10 20 20" aria-hidden="true"><path d={STAR_PATH} /></svg><span class="s-n">02</span>Config</p>
+					<h2 id="s-config" class="s-title">Describe the system.</h2>
+					<p class="s-lede">Talker, reasoning, actions, turn-taking and shared memory in one readable file. Change a line and the pipeline reloads.</p>
+				</header>
+				<div class="config" data-config>
+					<figure class="code">
+						<figcaption class="code-bar">
+							<span class="code-dot"></span>config.cuelo
+							<span class="reload" data-reload aria-live="polite"></span>
+						</figcaption>
+						<pre class="is-lines"><code set:html={configHtml} /></pre>
+					</figure>
+
+					<div class="live">
+						<p class="live-h"><span class="live-dot"></span>running pipeline</p>
+						<ol class="rail">
+							{
+								stages.map((s) => (
+									<li class="stage" data-stage={s.id}>
+										<span class="stage-node" aria-hidden="true" />
+										<span class="stage-name">{s.stage}</span>
+										<span class="slot-window is-stage">
+											<span class="slot-name">{s.value}</span>
+										</span>
+										<span class="stage-key">{s.key}</span>
+									</li>
+								))
+							}
+							<i class="rail-packet" aria-hidden="true" />
+						</ol>
+						<p class="live-foot">Hot reload keeps the call up. In-flight turns finish on the old config.</p>
+					</div>
+				</div>
+			</div>
+		</section>
+
+		<!-- 03 serve -->
+		<section class="section" aria-labelledby="s-serve">
+			<Garden variant="side" side="left" seed={2} />
+			<div class="inner">
+				<header class="s-head">
+					<p class="s-label"><svg class="s-star" viewBox="-10 -10 20 20" aria-hidden="true"><path d={STAR_PATH} /></svg><span class="s-n">03</span>Serve</p>
+					<h2 id="s-serve" class="s-title">One command. Your endpoint.</h2>
+					<p class="s-lede"><code>cuelo serve</code> stands the pipeline up behind an API. Speak the OpenAI Realtime protocol so existing clients just work, or declare your own routes.</p>
+				</header>
+
+				<div class="term" data-term>
+					<div class="term-bar">
+						<span class="term-title">~/support-line</span>
+						<div class="term-tabs" role="tablist" aria-label="API shape">
+							{
+								Object.entries(terminals).map(([id, t], i) => (
+									<button type="button" role="tab" class="term-tab" aria-selected={i === 0 ? 'true' : 'false'} data-api={id}>
+										api: {t.label}
+									</button>
+								))
+							}
+						</div>
+					</div>
+					{
+						Object.entries(terminals).map(([id, t], i) => (
+							<div class="term-body" data-term-panel={id} hidden={i !== 0}>
+								{t.lines.map(([kind, a = '', b = '']) => (
+									<p class:list={['tl', `is-${kind}`]}>
+										{kind === 'cmd' && (
+											<>
+												<span class="prompt">$</span> {a}
+											</>
+										)}
+										{kind === 'ok' && (
+											<>
+												<span class="ok">✓</span>
+												<span class="tl-k">{a}</span>
+												{b}
+											</>
+										)}
+										{kind === 'dim' && a}
+										{kind === 'route' && (
+											<>
+												<span class:list={['method', `is-${a.toLowerCase()}`]}>{a}</span>
+												<span class="tl-url">{b}</span>
+											</>
+										)}
+										{kind === 'ready' && (
+											<>
+												<span class="ready-dot" />
+												{a}
+											</>
+										)}
+										{kind === 'gap' && ' '}
+									</p>
+								))}
+							</div>
+						))
+					}
+				</div>
+
+				<div class="clients">
+					{
+						clients.map((c) => (
+							<figure class="client">
+								<figcaption>
+									<span class="client-lang">{c.label}</span>
+									<span class="client-note">{c.note}</span>
+								</figcaption>
+								<pre><code set:html={hlCode(c.code)} /></pre>
+							</figure>
+						))
+					}
+				</div>
+				<p class="s-foot">Any OpenAI Realtime client works unchanged. Point its base URL at Cuelo.</p>
+			</div>
+		</section>
+
+		<!-- 04 observe -->
+		<section class="section" aria-labelledby="s-observe">
+			<Garden variant="side" side="right" seed={3} />
+			<div class="inner">
+				<header class="s-head">
+					<p class="s-label"><svg class="s-star" viewBox="-10 -10 20 20" aria-hidden="true"><path d={STAR_PATH} /></svg><span class="s-n">04</span>Observe</p>
+					<h2 id="s-observe" class="s-title">See every turn.</h2>
+					<p class="s-lede">Every turn is traced: audio, VAD, transcripts, turn decisions, tool calls and each model's timing. Cuelo points at the slow stage and tells you which line to change.</p>
+				</header>
+
+				<div class="dash" aria-label="Example of the Cuelo dashboard for one call">
+					<div class="dash-bar">
+						<span class="dash-name">support-line</span>
+						<span class="dash-live"><span class="dash-dot"></span>live</span>
+						<span class="dash-turns" aria-hidden="true">
+							{Array.from({ length: 9 }, (_, i) => <i class:list={{ 'is-on': i === 3, 'is-done': i < 3, 'is-flag': i === 5 }} />)}
+						</span>
+						<span class="dash-meta">sess_7f3a · turn 4 of 9</span>
+					</div>
+
+					<div class="kpis">
+						{
+							kpis.map(([k, v, u]) => (
+								<div class="kpi">
+									<p class="kpi-k">{k}</p>
+									<p class="kpi-v">
+										{v}
+										<span>{u}</span>
+									</p>
+								</div>
+							))
+						}
+					</div>
+
+					<div class="dash-main">
+						<div class="trace">
+							<div class="trace-scale" aria-hidden="true">
+								{ticks.map((t) => <span style={`left:${pct(t)}`}>{t === 0 ? '0' : `${t / 1000}s`}</span>)}
+							</div>
+							{
+								trace.map((r) => (
+									<div class="trace-row">
+										<span class="trace-label">{r.label}</span>
+										<div class="trace-track">
+											{(r.kind === 'audio-in' || r.kind === 'audio-out') && (
+												<div class:list={['t-wave', r.kind === 'audio-in' ? 'is-in' : 'is-out']} style={`left:${pct(r.from)};width:${pct(r.to - r.from)}`}>
+													{r.wave!.map((h) => (
+														<i style={`height:${h}%`} />
+													))}
+												</div>
+											)}
+											{r.kind === 'bar' && <span class:list={['t-bar', { 'is-vad': r.label === 'vad' }]} style={`left:${pct(r.from)};width:${pct(r.to - r.from)}`} />}
+											{r.kind === 'tick' && <span class="t-tick" style={`left:${pct(r.from)};width:max(3px, ${pct(r.to - r.from)})`} />}
+											{r.kind === 'mark' && <span class="t-mark" style={`left:${pct(r.from)}`} />}
+											{r.note && (
+												<span class="t-note" style={`left:calc(${pct(r.to)} + 8px)`}>
+													{r.note}
+												</span>
+											)}
+										</div>
+									</div>
+								))
+							}
+							<div class="trace-guides" aria-hidden="true">
+								<span class="guide" style={`left:${pct(1450)}`} />
+								<span class="guide is-blue" style={`left:${pct(1938)}`} />
+								<span class="span-label" style={`left:${pct(1450)};width:${pct(488)}`}>ttfb 488ms</span>
+								<span class="playhead" />
+							</div>
+						</div>
+
+						<aside class="turn">
+							<p class="turn-h">Turn 4 · response</p>
+							<p class="turn-big">488<span>ms</span></p>
+							<p class="turn-sub">caller stops → first audio</p>
+							<div class="budget" aria-label="Where the 488ms went">
+								{budget.map((b) => <span class:list={['bud', `is-${b.tone}`]} style={`flex:${b.ms}`} />)}
+							</div>
+							<ul class="budget-legend">
+								{
+									budget.map((b) => (
+										<li>
+											<span class:list={['sw', `is-${b.tone}`]} />
+											{b.label}
+											<span class="ms">{b.ms}ms</span>
+										</li>
+									))
+								}
+							</ul>
+							<dl class="turn-stats">
+								<div><dt>end of turn</dt><dd>semantic · 0.94</dd></div>
+								<div><dt>asr confidence</dt><dd>0.97</dd></div>
+								<div><dt>tool calls</dt><dd>1 · 41ms</dd></div>
+								<div><dt>tokens</dt><dd>412 in · 18 out</dd></div>
+							</dl>
+						</aside>
+					</div>
+
+					<div class="dash-lower">
+						<div class="panel">
+							<p class="panel-h">Where to improve</p>
+							<ol class="tips">
+								{
+									suggestions.map((s) => (
+										<li class="tip">
+											<p class="tip-text">{s.text}</p>
+											<p class="tip-fix">
+												<code>{s.fix}</code>
+												<span>{s.why}</span>
+											</p>
+										</li>
+									))
+								}
+							</ol>
+						</div>
+						<div class="panel">
+							<p class="panel-h">Call summary <span class="panel-tag">written by the agent</span></p>
+							<p class="summary">
+								Caller asked to change the delivery address on order #48213. The talker looked up the order, confirmed the new address back to them and updated it. Resolved in 9 turns, 1m 54s.
+							</p>
+							<ul class="tags">
+								<li>intent · address_change</li>
+								<li>resolved</li>
+								<li>sentiment · neutral → positive</li>
+								<li>handoff · none</li>
+							</ul>
+							<div class="dash-transcript">
+								<p class="line"><span class="ts">00:41.2</span><span class="who">caller</span>Hi, I need to change my delivery address.</p>
+								<p class="line"><span class="ts">00:43.1</span><span class="who">talker</span>Sure. What's the new address?</p>
+							</div>
+						</div>
+					</div>
+
+					<div class="dash-foot">
+						<span class="store-dot"></span>saved to <code>sqlite://cuelo.db</code>
+						<span class="dash-foot-meta">9 turns · 2 tool calls · 1m 54s of audio</span>
+					</div>
+				</div>
+			</div>
+		</section>
+
+		<!-- 05 data -->
+		<section class="section" aria-labelledby="s-data">
+			<Garden variant="side" side="left" seed={4} />
+			<div class="inner">
+				<header class="s-head">
+					<p class="s-label"><svg class="s-star" viewBox="-10 -10 20 20" aria-hidden="true"><path d={STAR_PATH} /></svg><span class="s-n">05</span>Data</p>
+					<h2 id="s-data" class="s-title">Your calls, your database.</h2>
+					<p class="s-lede">Sessions, turns, transcripts, audio and summaries land in SQLite out of the box. Point Cuelo at Postgres or MySQL, or write an adapter for anything else.</p>
+				</header>
+				<div class="data">
+					<div class="store">
+						<p class="store-file">config.cuelo</p>
+						<pre class="gen-config"><span class="ln"><span class="t-k">store</span><span class="t-p">:</span></span><span class="ln">  <span class="t-k">url</span><span class="t-p">:</span> <span class="slot-window is-store" data-names={JSON.stringify(stores)} style="--delay: 0ms"><span class="slot-name">{stores[0]}</span></span></span><span class="ln">  <span class="t-k">audio</span><span class="t-p">:</span> <span class="t-v">./recordings</span>   <span class="t-c"># or s3://</span></span><span class="ln">  <span class="t-k">retain</span><span class="t-p">:</span> <span class="t-n">30d</span></span></pre>
+						<ul class="store-list">
+							<li><span>sqlite</span>default, zero setup</li>
+							<li><span>postgres</span>for production and teams</li>
+							<li><span>mysql</span>if that's what you run</li>
+							<li><span>custom</span>a small adapter interface</li>
+						</ul>
+					</div>
+					<ul class="schema">
+						{
+							tables.map(([t, cols]) => (
+								<li>
+									<span class="tbl">{t}</span>
+									<span class="cols">{cols}</span>
+								</li>
+							))
+						}
+					</ul>
+				</div>
+			</div>
+		</section>
+
+		<!-- 06 agents -->
+		<section class="section" aria-labelledby="s-cli">
+			<Garden variant="side" side="right" seed={5} />
+			<div class="inner">
+				<header class="s-head">
+					<p class="s-label"><svg class="s-star" viewBox="-10 -10 20 20" aria-hidden="true"><path d={STAR_PATH} /></svg><span class="s-n">06</span>Agents</p>
+					<h2 id="s-cli" class="s-title">Hand it to your agent.</h2>
+					<p class="s-lede">Cuelo ships an MCP server, so your coding agent can build, trace, test and tune pipelines with the same tools you use. Connect it once, then just ask.</p>
+				</header>
+
+				<div class="connect" data-connect>
+					<div class="connect-tabs" role="tablist" aria-label="Agent">
+						<span class="connect-step">1 · connect</span>
+						{
+							installs.map((x, i) => (
+								<button type="button" role="tab" class="seg-btn" aria-selected={i === 0 ? 'true' : 'false'} data-install={x.id}>
+									{x.label}
+								</button>
+							))
+						}
+					</div>
+					{
+						installs.map((x, i) => (
+							<div class="install" data-install-panel={x.id} hidden={i !== 0}>
+								<code class="install-code">
+									<span class="prompt-sign">{x.id === 'any' ? '' : '$'}</span>
+									{x.code}
+								</code>
+								<button type="button" class="copy-btn" data-copy={x.code}>
+									copy
+								</button>
+							</div>
+						))
+					}
+				</div>
+
+				<div class="agents" data-agents>
+					<div class="asks">
+						<p class="connect-step">2 · paste a prompt</p>
+						<ol class="ask-list">
+							{
+								runs.map((r, i) => (
+									<li>
+										<button type="button" class="ask" aria-pressed={i === 0 ? 'true' : 'false'} data-run={i}>
+											<span class="ask-title">{r.title}</span>
+											<span class="ask-text">{r.prompt}</span>
+										</button>
+										<button type="button" class="copy-btn is-small" data-copy={r.prompt} aria-label={`Copy prompt: ${r.title}`}>
+											copy
+										</button>
+									</li>
+								))
+							}
+						</ol>
+					</div>
+
+					<figure class="term agent-term">
+						<div class="term-bar">
+							<span class="term-title">agent · ~/support-line</span>
+							<span class="term-mcp"><span class="ready-dot"></span>cuelo mcp connected</span>
+						</div>
+						{
+							runs.map((r, i) => (
+								<div class="term-body" data-run-panel={i} hidden={i !== 0}>
+									<p class="tl is-ask">
+										<span class="prompt">&gt;</span>
+										<span class="ask-echo">{r.prompt}</span>
+									</p>
+									<p class="tl is-gap"> </p>
+									{r.steps.map(([kind, name, detail]) => (
+										<p class:list={['tl', `is-${kind}`]}>
+											<span class="mark">{kind === 'done' ? '✓' : kind === 'warn' ? '!' : kind === 'note' ? '→' : '●'}</span>
+											<span class="tl-tool">{name}</span>
+											{detail && <span class="tl-detail">{detail}</span>}
+										</p>
+									))}
+								</div>
+							))
+						}
+					</figure>
+				</div>
+
+				<div class="tools-row">
+					<p class="connect-step">tools your agent gets</p>
+					<ul class="tool-chips">
+						{mcpTools.map((t) => <li>{t}</li>)}
+					</ul>
+				</div>
+				<p class="s-foot">
+					Prefer the terminal? It's all a plain CLI too: {commands.map((c, i) => (
+						<>
+							<code class="inline-cmd">cuelo {c}</code>
+							{i < commands.length - 1 ? ' ' : '.'}
+						</>
+					))}
+				</p>
+			</div>
+		</section>
+	</main>
+
+	<footer class="foot-wrap">
+		<div class="foot">
+			<a href="/" class="logo is-small" aria-label="Cuelo home">cuelo<span class="logo-dot">.</span></a>
+			<nav class="foot-links" aria-label="Footer">
+				<a class="nav-link" href={LINKS.docs}>Docs</a>
+				<a class="nav-link" href={LINKS.github}>GitHub <span class="ext" aria-hidden="true">↗</span></a>
+			</nav>
+		</div>
+		<div class="foot-bed">
+			<Garden variant="foot" />
+		</div>
+	</footer>
+</Layout>
+
+<script>
+	const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+	const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
+
+	// run `fn` when `el` enters or leaves the screen
+	const whileVisible = (el: Element, fn: (on: boolean) => void) => new IntersectionObserver(([e]) => fn(e.isIntersecting), { threshold: 0.25 }).observe(el);
+
+	// roll a slot window to `text` (or its next name)
+	const roll = (w: HTMLElement, text?: string) => {
+		let next = text;
+		if (next === undefined) {
+			const names: string[] = JSON.parse(w.dataset.names ?? '[]');
+			const i = (Number(w.dataset.i ?? 0) + 1) % names.length;
+			w.dataset.i = String(i);
+			next = names[i];
+		}
+		const old = w.querySelector('.slot-name:not(.is-leaving)');
+		const el = document.createElement('span');
+		el.className = 'slot-name is-entering';
+		el.textContent = next;
+		w.appendChild(el);
+		requestAnimationFrame(() => requestAnimationFrame(() => el.classList.remove('is-entering')));
+		if (old) {
+			old.classList.add('is-leaving');
+			setTimeout(() => old.remove(), 600);
+		}
+	};
+
+	// ---- 01 + 05: name slots that roll on their own ----
+	const rolling = [...document.querySelectorAll<HTMLElement>('.slot-window[data-names]')];
+	if (rolling.length && !reduce) {
+		const visible = new Set<HTMLElement>();
+		rolling.forEach((w) => whileVisible(w, (v) => (v ? visible.add(w) : visible.delete(w))));
+		setInterval(() => {
+			rolling.forEach((w) => {
+				if (visible.has(w)) setTimeout(() => roll(w), parseInt(getComputedStyle(w).getPropertyValue('--delay')) || 0);
+			});
+		}, 2800);
+	}
+
+	// ---- 02: config.cuelo swaps a value as a diff; the running pipeline follows ----
+	const cfg = document.querySelector<HTMLElement>('[data-config]');
+	if (cfg && !reduce) {
+		const reload = cfg.querySelector<HTMLElement>('[data-reload]')!;
+		const swaps: { id: string; values: string[] }[] = [
+			{ id: 'tts', values: ['cartesia', 'smallest', 'elevenlabs'] },
+			{ id: 'model', values: ['openai', 'groq', 'anthropic'] },
+			{ id: 'turns', values: ['vad', 'semantic'] },
+			{ id: 'asr', values: ['deepgram', 'smallest'] },
+		];
+		let on = false;
+		whileVisible(cfg, (v) => (on = v));
+		(async () => {
+			let step = 0;
+			for (;;) {
+				await sleep(2200);
+				if (!on) continue;
+				const s = swaps[step % swaps.length];
+				const value = s.values[Math.floor(step / swaps.length) % s.values.length];
+				step++;
+				const span = cfg.querySelector<HTMLElement>(`[data-swap="${s.id}"]`);
+				const line = span?.closest<HTMLElement>('.ln');
+				if (!span || !line) continue;
+
+				// 1. the old line becomes a removal, a new line appears under it
+				line.classList.add('is-old');
+				const added = line.cloneNode(true) as HTMLElement;
+				added.classList.remove('is-old');
+				added.classList.add('is-new', 'is-opening');
+				const addedSpan = added.querySelector<HTMLElement>('[data-swap]')!;
+				addedSpan.textContent = '';
+				addedSpan.classList.add('is-typing');
+				line.after(added);
+				requestAnimationFrame(() => requestAnimationFrame(() => added.classList.remove('is-opening')));
+				await sleep(380);
+
+				// 2. type the new value
+				for (const ch of value) {
+					addedSpan.textContent += ch;
+					await sleep(65);
+				}
+				addedSpan.classList.remove('is-typing');
+				await sleep(450);
+
+				// 3. fold the old line away; the change is live
+				line.classList.add('is-gone');
+				reload.textContent = `reloaded · ${s.id} → ${value}`;
+				reload.classList.add('is-on');
+				const row = cfg.querySelector<HTMLElement>(`[data-stage="${s.id}"]`);
+				if (row) {
+					row.classList.add('is-hot');
+					roll(row.querySelector<HTMLElement>('.slot-window')!, value);
+				}
+				await sleep(420);
+				line.remove();
+				await sleep(1100);
+				added.classList.remove('is-new');
+				reload.classList.remove('is-on');
+				row?.classList.remove('is-hot');
+			}
+		})();
+	}
+
+	// ---- 03: `cuelo serve` prints line by line; the API toggle reruns it ----
+	const term = document.querySelector<HTMLElement>('[data-term]');
+	if (term) {
+		let run = 0;
+		const play = async (id: string) => {
+			const mine = ++run;
+			term.querySelectorAll<HTMLElement>('[data-term-panel]').forEach((p) => (p.hidden = p.dataset.termPanel !== id));
+			const lines = [...term.querySelectorAll<HTMLElement>(`[data-term-panel="${id}"] .tl`)];
+			if (reduce) return lines.forEach((l) => l.classList.add('is-in'));
+			lines.forEach((l) => l.classList.remove('is-in'));
+			for (const l of lines) {
+				if (mine !== run) return;
+				l.classList.add('is-in');
+				await sleep(l.classList.contains('is-cmd') ? 500 : l.classList.contains('is-gap') ? 60 : 130);
+			}
+		};
+		const tabs = [...term.querySelectorAll<HTMLButtonElement>('[data-api]')];
+		tabs.forEach((t) =>
+			t.addEventListener('click', () => {
+				tabs.forEach((x) => x.setAttribute('aria-selected', String(x === t)));
+				play(t.dataset.api!);
+			}),
+		);
+		term.classList.add('is-js');
+		let played = false;
+		whileVisible(term, (v) => {
+			if (v && !played) {
+				played = true;
+				play('realtime');
+			}
+		});
+	}
+
+	// ---- 06: copy buttons, install tabs, and prompt runs ----
+	document.querySelectorAll<HTMLButtonElement>('[data-copy]').forEach((b) =>
+		b.addEventListener('click', async () => {
+			try {
+				await navigator.clipboard.writeText(b.dataset.copy ?? '');
+				b.textContent = 'copied';
+			} catch {
+				b.textContent = 'press ⌘C';
+			}
+			setTimeout(() => (b.textContent = 'copy'), 1400);
+		}),
+	);
+	const connect = document.querySelector<HTMLElement>('[data-connect]');
+	if (connect) {
+		const tabs = [...connect.querySelectorAll<HTMLButtonElement>('[data-install]')];
+		tabs.forEach((t) =>
+			t.addEventListener('click', () => {
+				tabs.forEach((x) => x.setAttribute('aria-selected', String(x === t)));
+				connect.querySelectorAll<HTMLElement>('[data-install-panel]').forEach((p) => (p.hidden = p.dataset.installPanel !== t.dataset.install));
+			}),
+		);
+	}
+	const agents = document.querySelector<HTMLElement>('[data-agents]');
+	if (agents) {
+		const asks = [...agents.querySelectorAll<HTMLButtonElement>('[data-run]')];
+		const panels = [...agents.querySelectorAll<HTMLElement>('[data-run-panel]')];
+		let run = 0;
+		let current = 0;
+		let auto = true;
+		let on = false;
+		const show = async (i: number) => {
+			const mine = ++run;
+			current = i;
+			asks.forEach((a, k) => a.setAttribute('aria-pressed', String(k === i)));
+			panels.forEach((p, k) => (p.hidden = k !== i));
+			const lines = [...panels[i].querySelectorAll<HTMLElement>('.tl')];
+			if (reduce) return lines.forEach((l) => l.classList.add('is-in'));
+			lines.forEach((l) => l.classList.remove('is-in'));
+			for (const l of lines) {
+				if (mine !== run) return;
+				l.classList.add('is-in');
+				await sleep(l.classList.contains('is-ask') ? 650 : l.classList.contains('is-gap') ? 60 : 520);
+			}
+		};
+		asks.forEach((a, i) =>
+			a.addEventListener('click', () => {
+				auto = false; // the reader is driving now
+				show(i);
+			}),
+		);
+		agents.classList.add('is-js');
+		let started = false;
+		whileVisible(agents, (v) => {
+			on = v;
+			if (v && !started) {
+				started = true;
+				show(0);
+			}
+		});
+		// while nobody is clicking, move to the next prompt now and then
+		if (!reduce)
+			setInterval(() => {
+				if (auto && on) show((current + 1) % asks.length);
+			}, 7500);
+	}
+</script>

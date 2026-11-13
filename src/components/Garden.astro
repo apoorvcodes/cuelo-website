@@ -1,0 +1,143 @@
+---
+// A botanical frame: stippled ink thickets with flowers growing out of
+// them, ink stars on top, and a few twinkling sparkles.
+//   variant="hero" — frames the hero copy
+//   variant="foot" — a low bed that closes the page
+//   variant="side" — a section's margin garden; it measures the section's
+//                    `.inner` content box and grows only around it
+// Motion is minimal, like the old cloud sky: each flower sways on its own
+// slow cycle, stepped at ~12fps so the pixel grain stays crisp.
+// Purely decorative.
+
+interface Props {
+	variant?: 'hero' | 'foot' | 'side';
+	side?: 'left' | 'right';
+	first?: boolean; // the first section: its thicket continues the hero's
+	seed?: number;
+}
+const { variant = 'hero', side = 'left', first = false, seed = 0 } = Astro.props;
+
+// small sparkles that twinkle, as [x%, y%, size px, delay s, tone]
+type Sparkle = [number, number, number, number, 'ink' | 'grey'];
+const SPARKLES: Record<'hero' | 'foot' | 'side', Sparkle[]> = {
+	side: [],
+	hero: [
+		[39, 17.5, 16, 0, 'ink'],
+		[28.5, 79, 22, 1.2, 'ink'],
+		[60, 92.5, 18, 2.1, 'ink'],
+		[78, 70.5, 12, 0.6, 'grey'],
+	],
+	foot: [
+		[44, 30, 14, 0.4, 'ink'],
+		[57, 52, 18, 1.6, 'grey'],
+		[33, 70, 12, 2.4, 'ink'],
+	],
+};
+const sparkles = SPARKLES[variant];
+---
+
+<div class:list={['garden', `is-${variant}`]} data-variant={variant} data-side={side} data-first={first ? '1' : undefined} data-seed={seed} aria-hidden="true">
+	<canvas class="g-layer" data-layer="garden"></canvas>
+	<canvas class="g-stars" data-layer="stars"></canvas>
+	<div class="g-sparkles">
+		{
+			sparkles.map(([x, y, size, delay, tone], i) => (
+				<svg class:list={['g-sparkle', `is-${tone}`, { 'g-wide-only': i % 2 === 1 }]} style={`left:${x}%;top:${y}%;width:${size}px;height:${size}px;animation-delay:${delay}s`} viewBox="-10 -10 20 20">
+					<path d="M0-10Q.9-.9 10 0Q.9.9 0 10Q-.9.9-10 0Q-.9-.9 0-10Z" />
+				</svg>
+			))
+		}
+	</div>
+</div>
+
+<script>
+	import { buildGarden, renderGarden, isNarrow, type Garden, type Variant, type SideOpts } from '../scripts/garden';
+	import { drawStars, sideStars } from '../scripts/stars';
+
+	const css = getComputedStyle(document.documentElement);
+	const ink = css.getPropertyValue('--ink').trim() || '#0e0e0f';
+	const paper = css.getPropertyValue('--paper').trim() || '#f4f2ee';
+	const reduce = matchMedia('(prefers-reduced-motion: reduce)').matches;
+	const start = performance.now();
+
+	type Bed = { draw: (now: number) => void; visible: boolean };
+	const beds: Bed[] = [];
+
+	document.querySelectorAll<HTMLElement>('.garden').forEach((root) => {
+		const canvas = root.querySelector<HTMLCanvasElement>('[data-layer="garden"]');
+		const stars = root.querySelector<HTMLCanvasElement>('[data-layer="stars"]');
+		const ctx = canvas?.getContext('2d');
+		if (!canvas || !ctx) return;
+		const variant = (root.dataset.variant ?? 'hero') as Variant;
+		let garden: Garden | null = null;
+		let img: ImageData | null = null;
+		let size = '';
+
+		const bed: Bed = {
+			visible: true,
+			draw: (now) => {
+				if (!garden || !img) return;
+				renderGarden(garden, img, reduce ? 0 : (now - start) / 1000);
+				ctx.putImageData(img, 0, 0);
+			},
+		};
+		beds.push(bed);
+
+		const build = () => {
+			const w = root.clientWidth, h = root.clientHeight;
+			// side gardens fit around the section's content box
+			let opts: SideOpts | undefined;
+			if (variant === 'side') {
+				const inner = root.parentElement?.querySelector<HTMLElement>('.inner');
+				if (!inner) return;
+				const r = inner.getBoundingClientRect(), o = root.getBoundingClientRect();
+				const cs = getComputedStyle(inner);
+				const x0 = r.left - o.left + parseFloat(cs.paddingLeft);
+				const x1 = r.right - o.left - parseFloat(cs.paddingRight);
+				const side = (root.dataset.side ?? 'left') as 'left' | 'right';
+				// too little margin to grow anything: stay bare
+				if ((side === 'left' ? x0 : w - x1) < 120) {
+					root.classList.remove('is-ready');
+					garden = null;
+					size = '';
+					return;
+				}
+				opts = { contentX0: x0, contentX1: x1, side, first: root.dataset.first === '1', seed: Number(root.dataset.seed ?? 0) };
+			}
+			// the hero's garden hangs below the hero (its tail) and dissolves there
+			const tail = variant === 'hero' ? Math.max(0, h - (root.parentElement?.clientHeight ?? h)) : 0;
+			const next = `${w}x${h}x${tail}`;
+			if (!w || !h || next === size) return;
+			size = next;
+			garden = buildGarden(w, h, variant, opts, tail);
+			canvas.width = garden.W;
+			canvas.height = garden.H;
+			img = ctx.createImageData(garden.W, garden.H);
+			bed.draw(performance.now());
+			if (stars) drawStars(stars, w, h - tail, isNarrow(w, h - tail), ink, paper, variant === 'foot', opts ? sideStars(w, opts.contentX0, opts.contentX1, opts.side) : undefined);
+			root.classList.add('is-ready');
+		};
+
+		build();
+		let pending = 0;
+		new ResizeObserver(() => {
+			clearTimeout(pending);
+			pending = window.setTimeout(build, 120);
+		}).observe(root);
+		// only animate what's on screen
+		new IntersectionObserver(([e]) => (bed.visible = e.isIntersecting)).observe(root);
+	});
+
+	// ~12fps keeps the sway stepped, like pixel art (same as the old clouds)
+	if (!reduce && beds.length) {
+		let last = 0;
+		const loop = (now: number) => {
+			if (now - last > 80) {
+				last = now;
+				for (const b of beds) if (b.visible) b.draw(now);
+			}
+			requestAnimationFrame(loop);
+		};
+		requestAnimationFrame(loop);
+	}
+</script>
